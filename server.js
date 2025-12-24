@@ -47,13 +47,14 @@ io.on('connection', (socket) => {
         const user = registeredUsers.find(u => u.pseudo === data.pseudo && u.password === data.password);
         if (user) {
             currentUser = data.pseudo;
-            onlineUsers[currentUser] = socket.id;
-            socket.emit('auth-success', currentUser);
+            onlineUsers[currentUser] = socket.id; // On enregistre l'ID de connexion
             
-            // Envoyer l'historique et la liste des connectés
+            socket.emit('auth-success', currentUser);
             socket.emit('load-history', messagesHistory);
+
+            // ON ENVOIE LA LISTE MISE À JOUR À TOUT LE MONDE
             io.emit('update-users', Object.keys(onlineUsers));
-            console.log(currentUser + " s'est connecté");
+            console.log(currentUser + " est en ligne");
         } else {
             socket.emit('auth-error', 'Pseudo ou mot de passe incorrect.');
         }
