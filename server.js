@@ -19,7 +19,7 @@ let onlineUsers = {};
 
 // MIGRATION AUTO (Ajout du champ 'unread')
 registeredUsers = registeredUsers.map(u => {
-    if (!u.settings) u.settings = { chatBg: "", colorMe: "#ff7b00", colorOther: "rgba(255,255,255,0.1)", theme: "dark", opacity: "0.9" };
+    if (!u.settings) u.settings = { chatBg: "", colorMe: "#ff7b00", colorOther: "rgba(255,255,255,0.1)", theme: "dark", opacity: "0.4" };
     if (!u.unread) u.unread = {}; // Stocke: { "Pierre": 2, "Paul": 5 }
     if (!u.status) u.status = "Salut !"; 
     if (!u.banned) u.banned = false;
