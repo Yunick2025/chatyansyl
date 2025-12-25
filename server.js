@@ -10,31 +10,42 @@ app.use(express.static(__dirname));
 const USERS_FILE = './users.json';
 const MSGS_FILE = './messages.json';
 
-if (!fs.existsSync(USERS_FILE)) fs.writeFileSync(USERS_FILE, '[]');
-if (!fs.existsSync(MSGS_FILE)) fs.writeFileSync(MSGS_FILE, '[]');
+// CHARGEMENT SÉCURISÉ
+function safeLoad(path) {
+    try {
+        if (!fs.existsSync(path)) { fs.writeFileSync(path, '[]'); return []; }
+        const d = fs.readFileSync(path, 'utf8');
+        return d.trim() === "" ? [] : JSON.parse(d);
+    } catch (e) { fs.writeFileSync(path, '[]'); return []; }
+}
 
-let registeredUsers = JSON.parse(fs.readFileSync(USERS_FILE));
-let messagesHistory = JSON.parse(fs.readFileSync(MSGS_FILE));
+let registeredUsers = safeLoad(USERS_FILE);
+let messagesHistory = safeLoad(MSGS_FILE);
 let onlineUsers = {};
 
-// MIGRATION AUTO (Ajout du champ 'unread')
+// MIGRATION AUTO
 registeredUsers = registeredUsers.map(u => {
-    if (!u.settings) u.settings = { chatBg: "", colorMe: "#ff7b00", colorOther: "rgba(255,255,255,0.1)", theme: "dark", opacity: "0.0" };
-    if (!u.unread) u.unread = {}; // Stocke: { "Pierre": 2, "Paul": 5 }
-    if (!u.status) u.status = "Salut !"; 
+    if (!u.settings) u.settings = {};
+    // MODIF ICI : Opacité par défaut à 0.0 (Image claire)
+    if (!u.settings.opacity) u.settings.opacity = "0.0"; 
+    
+    if (!u.settings.chatBg) u.settings.chatBg = "";
+    if (!u.settings.colorMe) u.settings.colorMe = "#ff7b00";
+    if (!u.settings.colorOther) u.settings.colorOther = "rgba(255,255,255,0.1)";
+    if (!u.settings.theme) u.settings.theme = "dark";
+    
+    if (!u.status) u.status = "Salut !";
     if (!u.banned) u.banned = false;
     if (!u.avatar) u.avatar = "";
     if (!u.friends) u.friends = [];
     if (!u.requests) u.requests = [];
     if (!u.blocked) u.blocked = [];
+    if (!u.unread) u.unread = {};
     return u;
 });
 fs.writeFileSync(USERS_FILE, JSON.stringify(registeredUsers));
 
-function escapeHtml(text) {
-    if (typeof text !== 'string') return text;
-    return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
-}
+function escapeHtml(t) { if(typeof t!=='string')return t; return t.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#039;"); }
 
 app.get('/', (req, res) => { res.sendFile(__dirname + '/index.html'); });
 
@@ -51,7 +62,8 @@ io.on('connection', (socket) => {
                 pseudo: data.pseudo, password: hash, joinedAt: Date.now(),
                 age: data.age, sex: data.sex, avatar: data.avatar, status: "Salut !",
                 friends: [], requests: [], blocked: [], banned: false, unread: {},
-                settings: { chatBg: "", colorMe: "#ff7b00", colorOther: "rgba(255,255,255,0.1)", theme: "dark", opacity: "0.9" }
+                // MODIF ICI AUSSI : Opacité par défaut à 0.0
+                settings: { chatBg: "", colorMe: "#ff7b00", colorOther: "rgba(255,255,255,0.1)", theme: "dark", opacity: "0.0" }
             };
             registeredUsers.push(newUser);
             fs.writeFileSync(USERS_FILE, JSON.stringify(registeredUsers));
@@ -66,69 +78,26 @@ io.on('connection', (socket) => {
             currentUser = data.pseudo;
             onlineUsers[currentUser] = socket.id;
             const isAdmin = (currentUser === "Admin");
-
             socket.emit('auth-success', { pseudo: currentUser, avatar: user.avatar, status: user.status, settings: user.settings, isAdmin: isAdmin });
             socket.emit('load-history', messagesHistory);
             io.emit('update-users', Object.keys(onlineUsers));
             socket.emit('update-friends', { friends: user.friends, requests: user.requests });
             io.emit('update-statuses', getStatuses());
-            
-            // ENVOYER LES NOTIFICATIONS NON LUES
             socket.emit('update-unread', user.unread || {});
-            
             sendAvatarsMap();
         } else {
             socket.emit('auth-error', 'Identifiants incorrects');
         }
     });
 
-    // MARQUER COMME LU (Remet le compteur à 0)
-    socket.on('mark-read', (senderPseudo) => {
-        const user = registeredUsers.find(u => u.pseudo === currentUser);
-        if(user && user.unread && user.unread[senderPseudo]) {
-            delete user.unread[senderPseudo]; // On supprime le compteur
-            fs.writeFileSync(USERS_FILE, JSON.stringify(registeredUsers));
-            socket.emit('update-unread', user.unread);
-        }
-    });
-
-    // PRIVÉ (Avec incrémentation du compteur)
-    socket.on('private-msg', (data) => {
-        if(!currentUser) return;
-        const targetUser = registeredUsers.find(u => u.pseudo === data.to);
-        if (targetUser && targetUser.blocked.includes(currentUser)) return;
-
-        let content = "";
-        if(data.type === 'audio') content = data.audioData;
-        else if(data.type === 'image') content = data.image;
-        else content = escapeHtml(data.text);
-
-        const msg = { type: data.type || 'text', from: currentUser, to: data.to, content: content, date: Date.now() };
-        messagesHistory.push(msg);
-        fs.writeFileSync(MSGS_FILE, JSON.stringify(messagesHistory));
-        
-        // GESTION COMPTEUR NON LU
-        if(targetUser) {
-            if(!targetUser.unread) targetUser.unread = {};
-            if(!targetUser.unread[currentUser]) targetUser.unread[currentUser] = 0;
-            targetUser.unread[currentUser]++;
-            fs.writeFileSync(USERS_FILE, JSON.stringify(registeredUsers));
-            
-            // Si connecté, on met à jour son compteur en direct
-            const targetId = onlineUsers[data.to];
-            if (targetId) {
-                io.to(targetId).emit('private-msg', msg);
-                io.to(targetId).emit('update-unread', targetUser.unread);
-            }
-        }
-    });
-
-    // ... (Le reste du code standard) ...
+    // ... (Le reste du code reste exactement pareil, tu peux garder la fin) ...
+    socket.on('mark-read', (sender) => { const u=registeredUsers.find(x=>x.pseudo===currentUser); if(u&&u.unread&&u.unread[sender]){ delete u.unread[sender]; fs.writeFileSync(USERS_FILE, JSON.stringify(registeredUsers)); socket.emit('update-unread', u.unread); } });
     socket.on('save-settings', (ns) => { const u=registeredUsers.find(x=>x.pseudo===currentUser); if(u){ u.settings={chatBg:(ns.chatBg==="DEFAULT")?"":(ns.chatBg||u.settings.chatBg), colorMe:ns.colorMe||u.settings.colorMe, colorOther:ns.colorOther||u.settings.colorOther, theme:ns.theme||u.settings.theme, opacity:ns.opacity||u.settings.opacity}; fs.writeFileSync(USERS_FILE, JSON.stringify(registeredUsers)); socket.emit('notification', "Préférences sauvegardées !"); } });
     socket.on('update-profile', async (d) => { const u=registeredUsers.find(x=>x.pseudo===currentUser); if(u){ if(d.avatar)u.avatar=d.avatar; if(d.status)u.status=escapeHtml(d.status).substring(0,50); if(d.password&&d.password.trim()!==""){ const s=await bcrypt.genSalt(10); u.password=await bcrypt.hash(d.password,s); } fs.writeFileSync(USERS_FILE, JSON.stringify(registeredUsers)); socket.emit('profile-updated', "Profil mis à jour !"); io.emit('update-statuses', getStatuses()); sendAvatarsMap(); } });
     function getStatuses() { let s={}; registeredUsers.forEach(u=>s[u.pseudo]=u.status); return s; }
     function sendAvatarsMap() { let m={}; registeredUsers.forEach(u=>m[u.pseudo]=u.avatar); io.emit('update-avatars', m); }
     socket.on('chat message', (d) => { if(!currentUser)return; const id=Date.now()+Math.random().toString(36).substr(2,9); let c=d.type==='image'?d.image:escapeHtml(d.text); const m={id:id, type:d.type||'text', from:d.user, to:'all', content:c, date:Date.now()}; messagesHistory.push(m); if(messagesHistory.length>200)messagesHistory.shift(); fs.writeFileSync(MSGS_FILE, JSON.stringify(messagesHistory)); io.emit('chat message', m); });
+    socket.on('private-msg', (d) => { if(!currentUser)return; const t=registeredUsers.find(x=>x.pseudo===d.to); if(t&&t.blocked.includes(currentUser))return; let c=d.type==='audio'?d.audioData:(d.type==='image'?d.image:escapeHtml(d.text)); const m={type:d.type||'text', from:currentUser, to:d.to, content:c, date:Date.now()}; messagesHistory.push(m); fs.writeFileSync(MSGS_FILE, JSON.stringify(messagesHistory)); if(t){ if(!t.unread)t.unread={}; if(!t.unread[currentUser])t.unread[currentUser]=0; t.unread[currentUser]++; fs.writeFileSync(USERS_FILE, JSON.stringify(registeredUsers)); const sid=onlineUsers[d.to]; if(sid){ io.to(sid).emit('private-msg', m); io.to(sid).emit('update-unread', t.unread); } } });
     socket.on('admin-delete-msg', (id) => { if(currentUser!=="Admin")return; messagesHistory=messagesHistory.filter(m=>m.id!==id); fs.writeFileSync(MSGS_FILE, JSON.stringify(messagesHistory)); io.emit('load-history', messagesHistory); });
     socket.on('admin-ban-user', (p) => { if(currentUser!=="Admin")return; const u=registeredUsers.find(x=>x.pseudo===p); if(u){ u.banned=true; fs.writeFileSync(USERS_FILE, JSON.stringify(registeredUsers)); const s=onlineUsers[p]; if(s){ io.to(s).emit('force-disconnect'); io.sockets.sockets.get(s)?.disconnect(true); } io.emit('notification', `User ${p} banned.`); } });
     socket.on('get-user-info', (p) => { const u=registeredUsers.find(x=>x.pseudo===p), m=registeredUsers.find(x=>x.pseudo===currentUser); if(u&&m) socket.emit('user-info-result', { pseudo:u.pseudo, joinedAt:u.joinedAt, age:u.age, sex:u.sex, avatar:u.avatar, status:u.status, isFriend:m.friends.includes(p), requestSent:u.requests.includes(currentUser), isBlocked:m.blocked.includes(p) }); });
@@ -138,11 +107,11 @@ io.on('connection', (socket) => {
     socket.on('block-user', (p) => { const m=registeredUsers.find(x=>x.pseudo===currentUser), o=registeredUsers.find(x=>x.pseudo===p); if(m&&!m.blocked.includes(p)){ m.blocked.push(p); m.friends=m.friends.filter(f=>f!==p); if(o)o.friends=o.friends.filter(f=>f!==currentUser); fs.writeFileSync(USERS_FILE, JSON.stringify(registeredUsers)); socket.emit('update-friends', {friends:m.friends, requests:m.requests}); if(o&&onlineUsers[p]) io.to(onlineUsers[p]).emit('update-friends', {friends:o.friends, requests:o.requests}); } });
     socket.on('unblock-user', (p) => { const m=registeredUsers.find(x=>x.pseudo===currentUser); if(m){ m.blocked=m.blocked.filter(b=>b!==p); fs.writeFileSync(USERS_FILE, JSON.stringify(registeredUsers)); socket.emit('notification', `Débloqué: ${p}`); } });
     socket.on('call-user', (d) => { const t=registeredUsers.find(x=>x.pseudo===d.to); if(t&&t.blocked.includes(currentUser))return; const s=onlineUsers[d.to]; if(s) io.to(s).emit('call-made', {offer:d.offer, socket:socket.id, from:currentUser}); });
-    socket.on('make-answer', (d) => { io.to(d.to).emit('answer-made', {socket:socket.id, answer:data.answer}); });
+    socket.on('make-answer', (d) => { io.to(d.to).emit('answer-made', {socket:socket.id, answer:d.answer}); });
     socket.on('ice-candidate', (d) => { io.to(d.to).emit('ice-candidate', {candidate:d.candidate}); });
     socket.on('hang-up', (d) => { const t=onlineUsers[data.to]; if(t) io.to(t).emit('hang-up'); });
     socket.on('disconnect', () => { if (currentUser) { delete onlineUsers[currentUser]; io.emit('update-users', Object.keys(onlineUsers)); } });
 });
 
 const PORT = 3000;
-http.listen(PORT, () => { console.log("Serveur ULTIME V6 prêt sur port " + PORT); });
+http.listen(PORT, () => { console.log("Serveur ULTIME V7 prêt"); });
